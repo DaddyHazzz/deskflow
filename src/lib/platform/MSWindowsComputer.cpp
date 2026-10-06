@@ -671,9 +671,16 @@ bool MSWindowsComputer::isAnyMouseButtonDown(uint32_t &buttonID) const
 {
   static const char *buttonToName[] = {"<invalid>",    "Left Button", "Middle Button",
                                        "Right Button", "X Button 1",  "X Button 2"};
+  static const int buttonToVirtualKey[] = {0, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON, VK_XBUTTON1, VK_XBUTTON2};
 
-  for (uint32_t i = 1; i < sizeof(m_buttons) / sizeof(m_buttons[0]); ++i) {
-    if (m_buttons[i]) {
+  // Use the current physical Windows button state for the cross-computer drag
+  // lock instead of the event-driven m_buttons shadow state. If a hook event
+  // is ever lost (especially a button-up), the shadow state can remain stuck
+  // indefinitely and prevent leaving the active computer. GetAsyncKeyState()
+  // is also what the Windows keyboard hook already uses to repair stale key
+  // state, and remains current even when Deskflow is swallowing input events.
+  for (uint32_t i = 1; i < sizeof(buttonToVirtualKey) / sizeof(buttonToVirtualKey[0]); ++i) {
+    if ((GetAsyncKeyState(buttonToVirtualKey[i]) & 0x8000) != 0) {
       buttonID = i;
       LOG_DEBUG("locked by \"%s\"", buttonToName[i]);
       return true;
