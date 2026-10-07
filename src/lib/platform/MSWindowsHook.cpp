@@ -109,8 +109,10 @@ int MSWindowsHook::init(DWORD threadID)
   g_yComputer = 0;
   g_wComputer = 0;
   g_hComputer = 0;
+  // Never seed this from GetAsyncKeyState/GetKeyState. Deskflow can suppress
+  // mouse events, leaving those Windows states stale across a restart.
   g_mouseButtonState.store(0, std::memory_order_relaxed);
-  g_mouseButtonStateValid.store(false, std::memory_order_release);
+  g_mouseButtonStateValid.store(true, std::memory_order_release);
 
   return 1;
 }

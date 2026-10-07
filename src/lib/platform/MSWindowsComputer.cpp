@@ -678,21 +678,12 @@ bool MSWindowsComputer::isAnyMouseButtonDown(uint32_t &buttonID) const
   // GetAsyncKeyState() is not reliable here because swallowed releases can
   // leave the OS async state stuck until the hook is removed.
   uint32_t physicalButtons = 0;
-  if (MSWindowsHook::getPhysicalMouseButtonState(physicalButtons)) {
-    for (uint32_t i = 1; i <= 5; ++i) {
-      if ((physicalButtons & (1u << (i - 1))) != 0) {
-        buttonID = i;
-        LOG_DEBUG("locked by \"%s\"", buttonToName[i]);
-        return true;
-      }
-    }
+  if (!MSWindowsHook::getPhysicalMouseButtonState(physicalButtons)) {
     return false;
   }
 
-  // Before WH_MOUSE_LL observes its first physical button transition, preserve
-  // the existing startup snapshot semantics.
-  for (uint32_t i = 1; i < sizeof(m_buttons) / sizeof(m_buttons[0]); ++i) {
-    if (m_buttons[i]) {
+  for (uint32_t i = 1; i <= 5; ++i) {
+    if ((physicalButtons & (1u << (i - 1))) != 0) {
       buttonID = i;
       LOG_DEBUG("locked by \"%s\"", buttonToName[i]);
       return true;
