@@ -942,8 +942,12 @@ void MSWindowsComputer::onRawMouseInput(LPARAM lParam)
     }
 
     PRAWINPUT input = reinterpret_cast<PRAWINPUT>(buffer);
-    for (UINT i = 0; i < count; ++i, input = NEXTRAWINPUTBLOCK(input)) {
+    for (UINT i = 0; i < count; ++i) {
       processRawMouseInput(*input);
+
+      const auto next = reinterpret_cast<ULONG_PTR>(reinterpret_cast<PBYTE>(input) + input->header.dwSize);
+      const auto aligned = (next + sizeof(ULONG_PTR) - 1) & ~(sizeof(ULONG_PTR) - 1);
+      input = reinterpret_cast<PRAWINPUT>(aligned);
     }
   }
 }
