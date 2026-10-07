@@ -110,6 +110,9 @@ MSWindowsComputer::MSWindowsComputer(bool isPrimary, bool useHooks, IEventQueue 
     updateComputerShape();
     m_class = createWindowClass();
     m_window = createWindow(m_class, kAppNameW);
+    if (m_isPrimary) {
+      registerRawMouseInput(m_window);
+    }
     setupMouseKeys();
     LOG_DEBUG("computer shape: %d,%d %dx%d %s", m_x, m_y, m_w, m_h, m_multimon ? "(multi-monitor)" : "");
     LOG_DEBUG("window is 0x%08x", m_window);
@@ -123,6 +126,7 @@ MSWindowsComputer::MSWindowsComputer(bool isPrimary, bool useHooks, IEventQueue 
     delete m_keyState;
     delete m_desks;
     delete m_screensaver;
+    unregisterRawMouseInput();
     destroyWindow(m_window);
     destroyClass(m_class);
     s_computer = nullptr;
@@ -150,6 +154,7 @@ MSWindowsComputer::~MSWindowsComputer()
   delete m_keyState;
   delete m_desks;
   delete m_screensaver;
+  unregisterRawMouseInput();
   destroyWindow(m_window);
   destroyClass(m_class);
 
@@ -672,8 +677,21 @@ bool MSWindowsComputer::isAnyMouseButtonDown(uint32_t &buttonID) const
   static const char *buttonToName[] = {"<invalid>",    "Left Button", "Middle Button",
                                        "Right Button", "X Button 1",  "X Button 2"};
 
-  for (uint32_t i = 1; i < sizeof(m_buttons) / sizeof(m_buttons[0]); ++i) {
-    if (m_buttons[i]) {
+  // Raw Input is the primary physical-button authority. It receives HID
+  // transitions independently of the legacy messages Deskflow may suppress,
+  // and the WM_INPUT handler drains high-frequency backlogs in batches. The
+  // low-level hook tracker is retained only as a registration-failure fallback.
+  // Never use GetAsyncKeyState() here: swallowed releases can leave that OS
+  // state stuck until the hook is removed.
+  uint32_t physicalButtons = 0;
+  if (m_rawMouseInputRegistered.load(std::memory_order_acquire)) {
+    physicalButtons = m_rawMouseButtons.load(std::memory_order_acquire);
+  } else if (!MSWindowsHook::getPhysicalMouseButtonState(physicalButtons)) {
+    return false;
+  }
+
+  for (uint32_t i = 1; i <= 5; ++i) {
+    if ((physicalButtons & (1u << (i - 1))) != 0) {
       buttonID = i;
       LOG_DEBUG("locked by \"%s\"", buttonToName[i]);
       return true;
@@ -816,6 +834,124 @@ void MSWindowsComputer::destroyWindow(HWND hwnd) const
   }
 }
 
+void MSWindowsComputer::registerRawMouseInput(HWND hwnd)
+{
+  RAWINPUTDEVICE device{};
+  device.usUsagePage = 0x01; // HID_USAGE_PAGE_GENERIC
+  device.usUsage = 0x02;     // HID_USAGE_GENERIC_MOUSE
+  device.dwFlags = RIDEV_INPUTSINK;
+  device.hwndTarget = hwnd;
+
+  m_rawMouseButtons.store(0, std::memory_order_relaxed);
+  if (!RegisterRawInputDevices(&device, 1, sizeof(device))) {
+    LOG_WARN("failed to register raw mouse input, error: %d; using low-level hook fallback", GetLastError());
+    m_rawMouseInputRegistered.store(false, std::memory_order_release);
+    return;
+  }
+
+  m_rawMouseInputRegistered.store(true, std::memory_order_release);
+  LOG_INFO("registered raw mouse input for physical button tracking");
+}
+
+void MSWindowsComputer::unregisterRawMouseInput()
+{
+  if (!m_rawMouseInputRegistered.exchange(false, std::memory_order_acq_rel)) {
+    return;
+  }
+
+  RAWINPUTDEVICE device{};
+  device.usUsagePage = 0x01;
+  device.usUsage = 0x02;
+  device.dwFlags = RIDEV_REMOVE;
+  device.hwndTarget = nullptr;
+  if (!RegisterRawInputDevices(&device, 1, sizeof(device))) {
+    LOG_WARN("failed to unregister raw mouse input, error: %d", GetLastError());
+  }
+  m_rawMouseButtons.store(0, std::memory_order_release);
+}
+
+void MSWindowsComputer::processRawMouseInput(const RAWINPUT &input)
+{
+  if (input.header.dwType != RIM_TYPEMOUSE) {
+    return;
+  }
+
+  const USHORT flags = input.data.mouse.usButtonFlags;
+  uint32_t pressed = 0;
+  uint32_t released = 0;
+
+  if ((flags & RI_MOUSE_LEFT_BUTTON_DOWN) != 0) {
+    pressed |= 1u << 0;
+  }
+  if ((flags & RI_MOUSE_LEFT_BUTTON_UP) != 0) {
+    released |= 1u << 0;
+  }
+  if ((flags & RI_MOUSE_MIDDLE_BUTTON_DOWN) != 0) {
+    pressed |= 1u << 1;
+  }
+  if ((flags & RI_MOUSE_MIDDLE_BUTTON_UP) != 0) {
+    released |= 1u << 1;
+  }
+  if ((flags & RI_MOUSE_RIGHT_BUTTON_DOWN) != 0) {
+    pressed |= 1u << 2;
+  }
+  if ((flags & RI_MOUSE_RIGHT_BUTTON_UP) != 0) {
+    released |= 1u << 2;
+  }
+  if ((flags & RI_MOUSE_BUTTON_4_DOWN) != 0) {
+    pressed |= 1u << 3;
+  }
+  if ((flags & RI_MOUSE_BUTTON_4_UP) != 0) {
+    released |= 1u << 3;
+  }
+  if ((flags & RI_MOUSE_BUTTON_5_DOWN) != 0) {
+    pressed |= 1u << 4;
+  }
+  if ((flags & RI_MOUSE_BUTTON_5_UP) != 0) {
+    released |= 1u << 4;
+  }
+
+  if (pressed != 0) {
+    m_rawMouseButtons.fetch_or(pressed, std::memory_order_release);
+  }
+  if (released != 0) {
+    m_rawMouseButtons.fetch_and(~released, std::memory_order_release);
+  }
+}
+
+void MSWindowsComputer::onRawMouseInput(LPARAM lParam)
+{
+  RAWINPUT current{};
+  UINT currentSize = sizeof(current);
+  if (GetRawInputData(
+          reinterpret_cast<HRAWINPUT>(lParam), RID_INPUT, &current, &currentSize, sizeof(RAWINPUTHEADER)
+      ) != static_cast<UINT>(-1)) {
+    processRawMouseInput(current);
+  }
+
+  // A high-polling-rate mouse can accumulate additional raw events between
+  // message-loop iterations. Drain them in batches so button-up transitions
+  // cannot sit behind a long motion backlog.
+  alignas(RAWINPUT) BYTE buffer[64 * sizeof(RAWINPUT)];
+  for (;;) {
+    UINT bufferSize = sizeof(buffer);
+    const UINT count =
+        GetRawInputBuffer(reinterpret_cast<PRAWINPUT>(buffer), &bufferSize, sizeof(RAWINPUTHEADER));
+    if (count == 0 || count == static_cast<UINT>(-1)) {
+      break;
+    }
+
+    PRAWINPUT input = reinterpret_cast<PRAWINPUT>(buffer);
+    for (UINT i = 0; i < count; ++i) {
+      processRawMouseInput(*input);
+
+      const auto next = reinterpret_cast<ULONG_PTR>(reinterpret_cast<PBYTE>(input) + input->header.dwSize);
+      const auto aligned = (next + sizeof(ULONG_PTR) - 1) & ~(sizeof(ULONG_PTR) - 1);
+      input = reinterpret_cast<PRAWINPUT>(aligned);
+    }
+  }
+}
+
 void MSWindowsComputer::sendEvent(EventTypes type, void *data)
 {
   m_events->addEvent(Event(type, getEventTarget(), data));
@@ -935,6 +1071,13 @@ bool MSWindowsComputer::onPreDispatchPrimary(HWND, UINT message, WPARAM wParam, 
 bool MSWindowsComputer::onEvent(HWND, UINT msg, WPARAM wParam, LPARAM lParam, LRESULT *result)
 {
   switch (msg) {
+
+  case WM_INPUT:
+    if (m_rawMouseInputRegistered.load(std::memory_order_acquire)) {
+      onRawMouseInput(lParam);
+    }
+    // Let DefWindowProc perform the required raw-input cleanup for RIM_INPUT.
+    return false;
 
   case WM_CLIPBOARDUPDATE: {
     DWORD clipboardSequenceNumber = GetClipboardSequenceNumber();

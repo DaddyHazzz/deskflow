@@ -1,0 +1,63 @@
+﻿name: Local Windows Validation
+
+on:
+  push:
+    branches:
+      - fix/windows-stale-mouse-button-lock
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-2022-x64:
+    runs-on: windows-2022
+    timeout-minutes: 35
+    env:
+      CMAKE_CONFIGURE: cmake -Bbuild -DCMAKE_BUILD_TYPE=Release -DSKIP_BUILD_TESTS=ON -DCMAKE_COMPILE_WARNING_AS_ERROR=ON -DBUILD_INSTALLER=OFF
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup VC++
+        uses: TheMrMilchmann/setup-msvc-dev@v4
+        with:
+          arch: amd64
+          spectre: true
+
+      - name: Install dependencies
+        id: get-deps
+        uses: ./.github/actions/install-dependencies
+        with:
+          qt-version: 6.11.3
+          vcpkg-triplet: x64-windows-release
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          $cmd = "$env:CMAKE_CONFIGURE -G Ninja ${{ steps.get-deps.outputs.vcpkg-cmake-config }} -DPACKAGE_VERSION_LABEL=1.27.0-localfix"
+          Write-Host $cmd
+          Invoke-Expression $cmd
+
+      - name: Build
+        run: cmake --build build --config Release -j8
+
+      - name: Tests
+        uses: ./.github/actions/run-tests
+        with:
+          job: windows-2022-x64
+
+      - name: Stage core artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifact | Out-Null
+          Copy-Item build/bin/deskflow-core.exe artifact/
+          Get-FileHash artifact/deskflow-core.exe -Algorithm SHA256 | Format-List | Out-File artifact/sha256.txt
+
+      - name: Upload patched core
+        uses: actions/upload-artifact@v7
+        with:
+          name: deskflow-core-windows-x64-stale-button-fix
+          path: artifact/
+          if-no-files-found: error

@@ -65,6 +65,11 @@ public:
   //! Copy the hook's physical key state; false until it has observed an event.
   static bool getPhysicalKeyState(BYTE keys[256]);
 
+  //! Copy the physical mouse-button state captured directly by WH_MOUSE_LL.
+  //! Bits 0..4 correspond to left, middle, right, X1, and X2.
+  //! State initializes to all-up and is updated only by physical hook events.
+  static bool getPhysicalMouseButtonState(uint32_t &buttons);
+
   static EHookResult install();
 
   static int uninstall();

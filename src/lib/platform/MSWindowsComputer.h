@@ -12,6 +12,7 @@
 #include "platform/MSWindowsHook.h"
 #include "platform/MSWindowsPowerManager.h"
 
+#include <atomic>
 #include <map>
 #include <string>
 
@@ -140,6 +141,12 @@ private:
   void destroyClass(ATOM windowClass) const;
   HWND createWindow(ATOM windowClass, const wchar_t *name) const;
   void destroyWindow(HWND) const;
+
+  // raw physical mouse state for drag-lock decisions
+  void registerRawMouseInput(HWND);
+  void unregisterRawMouseInput();
+  void onRawMouseInput(LPARAM);
+  void processRawMouseInput(const RAWINPUT &);
 
   // convenience function to send events
 public: // HACK
@@ -315,8 +322,13 @@ private:
   HotKeyIDList m_oldHotKeyIDs;
   HotKeyToIDMap m_hotKeyToIDMap;
 
-  // map of button state
+  // map of button state used by the existing queued event path
   bool m_buttons[NumButtonIDs];
+
+  // authoritative physical mouse-button state from Raw Input. Raw Input is
+  // independent of the legacy mouse messages Deskflow may suppress.
+  std::atomic<uint32_t> m_rawMouseButtons{0};
+  std::atomic_bool m_rawMouseInputRegistered{false};
 
   // m_hasMouse is true if there's a mouse attached to the system or
   // mouse keys is simulating one.  we track this so we can force the
