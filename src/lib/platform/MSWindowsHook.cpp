@@ -10,6 +10,7 @@
 #include "base/Log.h"
 #include "deskflow/DisplayException.h"
 
+#include <atomic>
 #include <cstring>
 #include <mutex>
 
@@ -39,6 +40,8 @@ static BYTE g_deadKeyState[256] = {0};
 static BYTE g_keyState[256] = {0};
 static bool g_keyStateValid = false;
 static std::mutex g_keyStateMutex;
+static std::atomic<uint32_t> g_mouseButtonState{0};
+static std::atomic_bool g_mouseButtonStateValid{false};
 static DWORD g_hookThread = 0;
 static bool g_fakeServerInput = false;
 static BOOL g_isPrimary = TRUE;
@@ -106,6 +109,8 @@ int MSWindowsHook::init(DWORD threadID)
   g_yComputer = 0;
   g_wComputer = 0;
   g_hComputer = 0;
+  g_mouseButtonState.store(0, std::memory_order_relaxed);
+  g_mouseButtonStateValid.store(false, std::memory_order_release);
 
   return 1;
 }
@@ -154,6 +159,16 @@ bool MSWindowsHook::getPhysicalKeyState(BYTE keys[256])
     std::memcpy(keys, g_keyState, sizeof(g_keyState));
   }
   return g_keyStateValid;
+}
+
+bool MSWindowsHook::getPhysicalMouseButtonState(uint32_t &buttons)
+{
+  if (!g_mouseButtonStateValid.load(std::memory_order_acquire)) {
+    return false;
+  }
+
+  buttons = g_mouseButtonState.load(std::memory_order_acquire);
+  return true;
 }
 
 static void keyboardGetState(BYTE keys[256], DWORD vkCode, bool kf_up)
@@ -488,6 +503,68 @@ static LRESULT CALLBACK keyboardLLHook(int code, WPARAM wParam, LPARAM lParam)
 // events very early.  the earlier the better.
 //
 
+static void updatePhysicalMouseButtonState(WPARAM wParam, int32_t data)
+{
+  uint32_t mask = 0;
+  bool pressed = false;
+
+  switch (wParam) {
+  case WM_LBUTTONDOWN:
+  case WM_LBUTTONDBLCLK:
+    mask = 1u << 0;
+    pressed = true;
+    break;
+  case WM_LBUTTONUP:
+    mask = 1u << 0;
+    break;
+  case WM_MBUTTONDOWN:
+  case WM_MBUTTONDBLCLK:
+    mask = 1u << 1;
+    pressed = true;
+    break;
+  case WM_MBUTTONUP:
+    mask = 1u << 1;
+    break;
+  case WM_RBUTTONDOWN:
+  case WM_RBUTTONDBLCLK:
+    mask = 1u << 2;
+    pressed = true;
+    break;
+  case WM_RBUTTONUP:
+    mask = 1u << 2;
+    break;
+  case WM_XBUTTONDOWN:
+  case WM_XBUTTONDBLCLK:
+    if (data == XBUTTON1) {
+      mask = 1u << 3;
+    } else if (data == XBUTTON2) {
+      mask = 1u << 4;
+    }
+    pressed = true;
+    break;
+  case WM_XBUTTONUP:
+    if (data == XBUTTON1) {
+      mask = 1u << 3;
+    } else if (data == XBUTTON2) {
+      mask = 1u << 4;
+    }
+    break;
+  default:
+    return;
+  }
+
+  if (mask == 0) {
+    return;
+  }
+
+  if (pressed) {
+    g_mouseButtonState.fetch_or(mask, std::memory_order_release);
+  } else {
+    g_mouseButtonState.fetch_and(~mask, std::memory_order_release);
+  }
+  g_mouseButtonStateValid.store(true, std::memory_order_release);
+}
+
 static bool mouseHookHandler(WPARAM wParam, int32_t x, int32_t y, int32_t data)
 {
   switch (wParam) {
@@ -607,6 +684,10 @@ static LRESULT CALLBACK mouseLLHook(int code, WPARAM wParam, LPARAM lParam)
     int32_t x = static_cast<int32_t>(info->pt.x);
     int32_t y = static_cast<int32_t>(info->pt.y);
     int32_t w = static_cast<int16_t>(HIWORD(info->mouseData));
+
+    if (!injected) {
+      updatePhysicalMouseButtonState(wParam, w);
+    }
 
     // handle the message
     if (mouseHookHandler(wParam, x, y, w)) {
